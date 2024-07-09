@@ -1,0 +1,319 @@
+library("jagsUI")
+datos<-as.data.frame(Imports_tp)
+
+### estandarizar variables####
+#Sacar decimales 
+datos$Imports<-round(datos$Imports,2)
+datos$Events<-round(datos$Events,0)
+datos$Distance<-round(datos$Distance,0)
+datos$Events_anios<-round(datos$Events_anios,2)
+datos$Species_anios<-round(datos$Species_anios,2)
+
+names(datos)
+#con las variables estandarizadas
+datos1=as.data.frame(scale(datos[,c(7,9,11)], scale=T, center=T))
+datos<-cbind(datos,Imports_anios1=datos1$Imports_anios,Distance1=datos1$Distance,Species_anios1=datos1$Species_anios)
+
+summary(datos)
+
+# mi variable de respuesta es especies por año, es decir una variable continua
+#las distribuciones posibles pueden ser gamma o lognormal
+
+#####Lognormal jerarquico#####
+
+#la parte determinístca del modelo es una función Michaelis Menten con un parámetro que representa la asintota de la función y otro que representa el valor de abscisas cuando se llega a la mitad de la asintota
+# a y c son asintotas de las curvas de imports y distancia respectivamente 
+# b y d son 1/2 asintotas. En mi sistema indican cuan rápido se llega a la mitad de la asintota. A priori, a no podría ser nunca mas de 7000 especies porque esas son las especies conocidas del grupo (Escarabajos de la corteza + escarabajos de ambrosía) y no puede ser negativo. Por otro en relación a mis datos (teniendo en cuenta todas las intercepciones se registraron 361 sp)
+# el rango de importaciones/año (centrada y estandarizada) es -0.30 a 10.9
+#el rango de distancias es  distancia (centrada y estandarizada) es -2.04 a 2.36, estos rangos tienen que ifluir en los valores de c y d ( de imports y distancia respectivamente)
+#el max de especies/año interceptado en un país es 3.6 sp.
+
+max(datos$Species_anios)
+summary (datos)
+
+#la parte estocastica tiene una distribucion gamma o lognormal porque son número de especies/año que me dan valores continuos siempre positivos
+#El efecto aleatorio está dado por la variabilidad de los países receptores (USA, JAPON, Nueva Zelanda, Canadá y Chile)
+
+#1. MODELO (LM) EN LENGUAJE BUGS (JAGS)
+cat(
+  file = "lognorm.bug",
+  "
+   model {
+
+  # Funcion de likelihood
+   for (i in 1:n) {
+    Species_anios[i] ~ dlnorm(mu[i], tau)
+  mu[i] <- (a [Recipient[i]]* Imports_anios1[i] + c[Recipient[i]]*Distance1[i] ) 
+  / ((b [Recipient[i]]+ Imports_anios1[i])+ (d[Recipient[i]]+Distance1[i]))
+    }
+ 
+  # Previas para los coeficientes de cada sitio
+ 
+  for (r in 1:nrecipient){
+   a[r] ~ dnorm(mua, taua)
+   b[r] ~ dnorm(mub, taub)
+   c[r] ~ dnorm(muc, tauc)
+   d[r] ~ dnorm(mud, taud)
+  }
+ 
+  sigma ~ dunif(0, 80)
+  tau <- pow(sigma,-2)
+  
+  mua ~ dnorm(2, 1.5)
+  sigmaa ~ dunif(0, 100)
+  taua <- pow(sigmaa,-2)
+  
+  mub ~ dnorm(5, 0.1)
+  sigmab ~ dunif(0, 100)
+  taub <- pow(sigmab,-2)
+  
+  muc ~ dnorm(2, 1.5)
+  sigmac ~ dunif(0, 100)
+  tauc <- pow(sigmac,-2)
+  
+  mud ~ dnorm(-1, 1.5)
+  sigmad ~ dunif(0, 100)
+  taud <- pow(sigmad,-2)
+     }
+ "
+)
+
+#
+#un tau de 0.01 equivale a un sigma de 10
+sqrt(1/0.01)
+# tau de cuanto sería un sigma de 4?
+
+#4=strt(1/tau)
+#1/4*4= tau
+1/16
+
+#empaquetar los datos
+
+Species_anios<-datos$Species_anios
+Imports_anios1<- datos$Imports_anios1
+Distance1 <- datos$Distance1
+
+n <- length(Species_anios)
+Recipient <- as.numeric(as.factor(datos$Recipient))
+nrecipient <- length (unique(Recipient))
+
+data <- list(Species_anios = Species_anios, 
+             Imports_anios1 = Imports_anios1, Distance1= Distance1,
+             Recipient = Recipient, nrecipient = nrecipient,
+             n = n)
+
+params <- c("a", "b","c","d", "sigma", 
+            "mua","mub","muc","mud", "sigmaa","sigmab","sigmac","sigmad")
+
+inits <- function(){list(a = runif(nrecipient, 0, 80), 
+                         b = runif(nrecipient, 0, 80),
+                         c = runif(nrecipient, 0, 80),
+                         d = runif(nrecipient, 0, 80),
+                         sigma = runif(1, 0, 1000),
+                         mua = runif(1, 0, 80),
+                         sigmaa = runif(1, 0, 1000),
+                         mub = runif(1, 0, 80),
+                         sigmab = runif(1, 0, 1000),
+                         muc = runif(1, 0, 80),
+                         sigmac = runif(1, 0, 1000),
+                         mud = runif(1, 0, 80),
+                         sigmad = runif(1, 0, 1000)
+)
+}
+
+#6. DEFINIMOS LOS MCMC SETTINGS
+nc <- 3    # num cadenas
+ni <- 10000  # num iteraciones (= pasos)
+nt <- 2    # thinning rate
+nb <- 3000  # num burning
+
+#7. LANZAMOS EL MODELO EN JAGS
+m1 <- jags(data = data, 
+                parameters.to.save = params, 
+                #inits = inits, 
+                model.file = "lognorm.bug",
+                n.chains = nc, 
+                n.thin = nt, 
+                n.iter = ni, 
+                n.burnin = nb)
+
+
+# save(regLin, file= "m1.rda")
+# load("m1.rda")
+
+#8. DIAGNOSTICAMOS EL MODELO
+##8.1. DIAGNOSTICAMOS EL COMPORTAMIENTO DE LAS CADENAS MCMC 
+plot(m1)
+print(m1)
+
+##8.2. DIAGNOSTICAMOS EL COMPORTAMIENTO DEL MODELO (POSTERIOR PREDICTIVE CHECK) 
+output <- m1$sims.list # Guarda las muestras de las posteriores conjuntas 
+#que visitaron las cadenas (MCMC)
+
+estimates <- as.data.frame(cbind(output$a, # Guarda los coeficientes estimados
+                                 output$b,
+                                 output$c, 
+                                 output$d, 
+                                 output$sigma, 
+                                 output$mua, 
+                                 output$sigmaa,
+                                 output$mub, 
+                                 output$sigmab,
+                                 output$muc, 
+                                 output$sigmac,
+                                 output$mud, 
+                                 output$sigmad))
+
+# Asignar nombres a las columnas
+colnames(estimates) <- c(paste("a", 1:nrecipient, sep = ""),
+                         paste("b", 1:nrecipient, sep = ""),
+                         paste("c", 1:nrecipient, sep = ""),
+                         paste("d", 1:nrecipient, sep = ""),
+                         "sigma", "mua", "sigmaa", "mub", "sigmab", "muc", "sigmac", "mud", "sigmad")
+
+###8.3. GENERAMOS UNA PREDICCION USANDO EL MODELO ESTIMADO (m1)
+nsim <- 50 # predigamos usando las primeras 50 muestras de la posterior,
+# para que nuestras compus no colapsen
+
+
+# Número de predicciones
+npred <- 50 # predigamos usando las primeras 50 muestras de la posterior
+
+# Número de observaciones
+n <- length(Imports_anios1) 
+
+# Matriz para almacenar las predicciones
+species_sim <- matrix(NA, n, npred)
+colnames(species_sim) <- paste("species_sim", rep(1:npred), sep = "")
+
+# Generar predicciones
+for (i in 1:n){
+  for (j in 1:npred){
+    mu <- (estimates[j, paste("a", Recipient[i], sep = "")] * Imports_anios1[i] +
+             estimates[j, paste("c", Recipient[i], sep = "")] * Distance1[i]) / 
+      (estimates[j, paste("b", Recipient[i], sep = "")] + Imports_anios1[i] + 
+         estimates[j, paste("d", Recipient[i], sep = "")] + Distance1[i])
+    species_sim[i, j] <- rlnorm(1, mu, estimates$sigma[j])
+  }
+}
+
+# Ver las primeras filas de la matriz de predicciones
+head(species_sim)
+
+
+###8.4. PLOTEAMOS LA PREDICCION
+
+# Asignar colores a cada recipient
+recipients <- unique(Recipient)
+# mi paleta
+Recipientes_paleta <- c(Japon="#89080A", EEUU="#C5AA73", NZ="#FF9933", Canada="#009E73", Chile="#8B5B45") 
+observed_colors <- sapply(Recipient, function(rec) Recipientes_paleta[which(recipients == rec)])
+
+plot(x = Imports_anios1, 
+     y = Species_anios, 
+     xlab = "Imports ($$)",
+     ylab = "Species", 
+     col = 0, axes = F)
+
+# Definir los ejes
+axis(side=1, 
+     at = seq(0, 12, 1),
+     labels = seq(0, 12, 1), 
+     col = 1, las = 1)
+axis(side = 2, 
+     at = seq(0, 10, 1),
+     labels = seq(0,10, 1), 
+     col = 1, las = 1)
+
+
+# Graficar los datos observados con colores según el recipient
+points(x = Imports_anios1, 
+       y = Species_anios, 
+       pch = 16, col = observed_colors, cex = 1)
+
+# Graficar las predicciones para cada Recipient con un loop que pase por los recipientes
+recipients <- unique(Recipient)
+
+for (r in 1:length(recipients)) {
+  recipient <- recipients[r]
+  
+  curve(((m1$mean$a[recipient] * x) + (m1$mean$c[recipient] * mean(Distance1))) / 
+          ((m1$mean$b[recipient] + x) + (m1$mean$d[recipient] + mean(Distance1))),
+        from = min(Imports_anios1), to = max(Imports_anios1), 
+        add = TRUE, col = Recipientes_paleta[r], lwd = 2)
+}
+
+#la curva global es con las medias de hiperparametros mua, mub, muc, mud
+curve(((m1$mean$mua* x) + (m1$mean$muc* mean(Distance1))) / 
+        ((m1$mean$mub + x) + (m1$mean$mud + mean(Distance1))),
+      from = min(Imports_anios1), to = max(Imports_anios1), 
+      add = TRUE, col = "black", lwd = 2, lty = 2)
+
+
+# Agregar leyenda
+legend("topright", legend = c(paste("Recipient", recipients), "Global Prediction"), 
+       col = c(Recipientes_paleta, "black"), lty = c(rep(1, length(recipients)), 2), 
+       lwd = 3, cex = 0.8, bty = "n")
+#
+
+#Pero dijimos que lo interesante es ver como las simulaciones coinciden con los observados. Para eso tengo que graficarlas.
+
+# Configurar el gráfico base con datos observados y ejes
+plot(x = Imports_anios1, 
+     y = Species_anios, 
+     xlab = "Imports ($$)",
+     ylab = "Species", 
+     col = 0, axes = F)
+
+# Definir los ejes
+axis(side = 1, 
+     at = seq(0, 12, 1),
+     labels = seq(0, 12, 1), 
+     col = 1, las = 1)
+axis(side = 2, 
+     at = seq(0, 10, 1),
+     labels = seq(0, 10, 1), 
+     col = 1, las = 1)
+
+# Graficar los datos observados con colores según el recipient
+points(x = Imports_anios1, 
+       y = Species_anios, 
+       pch = 16, col = observed_colors, cex = 1)
+
+# Graficar las simulaciones individuales para cada punto de datos que hice mas arriba
+for (i in 1:n) {
+  for (j in 1:npred) {
+    points(x = Imports_anios1[i], 
+           y = species_sim[i, j], 
+           pch = 1, col = "grey", alpha= 0.5, cex = 0.5)
+  }
+}
+
+# y las medias de las simulaciones para cada punto de datos?
+species_sim_mean <- rowMeans(species_sim)
+points(x = Imports_anios1, 
+       y = species_sim_mean, 
+       pch = 16, col = "blue", cex = 1)
+
+# Graficar las predicciones para cada Recipient
+recipients <- unique(Recipient)
+
+for (r in 1:length(recipients)) {
+  recipient <- recipients[r]
+  
+  curve(((m1$mean$a[recipient] * x) + (m1$mean$c[recipient] * mean(Distance1))) / 
+          ((m1$mean$b[recipient] + x) + (m1$mean$d[recipient] + mean(Distance1))),
+        from = min(Imports_anios1), to = max(Imports_anios1), 
+        add = TRUE, col = Recipientes_paleta[r], lwd = 2)
+}
+
+# Calcular y graficar la predicción global
+curve(((m1$mean$mua* x) + (m1$mean$muc* mean(Distance1))) / 
+        ((m1$mean$mub + x) + (m1$mean$mud + mean(Distance1))),
+      from = min(Imports_anios1), to = max(Imports_anios1), 
+      add = TRUE, col = "black", lwd = 2, lty = 2)
+
+# Agregar leyenda
+legend("topright", legend = c(paste("Recipient", recipients), "Global Prediction", "Simulations Mean"), 
+       col = c(Recipientes_paleta, "black", "blue"), lty = c(rep(1, length(recipients)), 2, NA), 
+       lwd = 3, pch = c(rep(NA, length(recipients) + 1), 16), cex = 0.5, bty = "n")
